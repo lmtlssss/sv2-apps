@@ -280,7 +280,7 @@ impl MonitoringServer {
 
         let app = Router::new()
             .route(routes::ROOT, get(handle_root))
-            .merge(SwaggerUi::new(routes::SWAGGER_UI).url(routes::OPENAPI_SPEC, ApiDoc::openapi()))
+            .merge(swagger_ui())
             .nest(routes::API_V1_PREFIX, api_v1)
             .route(routes::METRICS, get(handle_prometheus_metrics))
             .with_state(self.state);
@@ -308,6 +308,13 @@ impl MonitoringServer {
         info!("Monitoring server stopped");
         result.map_err(|e| e.into())
     }
+}
+
+/// Builds the embedded UI around this crate's generated OpenAPI document.
+fn swagger_ui() -> SwaggerUi {
+    let document =
+        serde_json::to_value(ApiDoc::openapi()).expect("generated OpenAPI document must serialize");
+    SwaggerUi::new(routes::SWAGGER_UI).external_url_unchecked(routes::OPENAPI_SPEC, document)
 }
 
 // Response types — used for both actual responses, OpenAPI documentation,
@@ -2047,5 +2054,34 @@ mod tests {
         assert!(resp.sv2_clients.is_none());
         // SV1 clients should be present
         assert_eq!(resp.sv1_clients.as_ref().unwrap().total_clients, 1);
+    }
+
+    #[tokio::test]
+    async fn swagger_document_and_assets_preserve_contract() {
+        let app = Router::new().merge(swagger_ui());
+        let response = app
+            .clone()
+            .oneshot(make_request(routes::OPENAPI_SPEC))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let served: serde_json::Value = serde_json::from_str(&get_body(response).await).unwrap();
+        let generated = serde_json::to_value(ApiDoc::openapi()).unwrap();
+        assert_eq!(served, generated);
+        #[cfg(not(feature = "asic-rs-telemetry"))]
+        assert_eq!(
+            served,
+            serde_json::from_str::<serde_json::Value>(include_str!("openapi.json")).unwrap()
+        );
+
+        for suffix in ["/", "/swagger-ui.css", "/swagger-ui-bundle.js"] {
+            let response = app
+                .clone()
+                .oneshot(make_request(&format!("{}{}", routes::SWAGGER_UI, suffix)))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{suffix}");
+            assert!(get_body(response).await.len() > 100, "{suffix}");
+        }
     }
 }
